@@ -10,6 +10,8 @@ import paramiko
 import serial
 from serial.tools import list_ports
 
+from .ssh_auth import HostTrust, SSHFailure, classify_failure
+
 
 def serial_ports() -> list[dict]:
     return [{"port": p.device, "description": p.description, "vid": p.vid, "pid": p.pid,
@@ -53,31 +55,45 @@ class SerialTransport:
 
 class SSHTransport:
     def __init__(self, host: str, username: str, port: int, key_file: str | None,
-                 known_hosts: str | None, password_env: str | None):
-        if not host or not username or not 1 <= port <= 65535:
-            raise ValueError("host, username and valid SSH port are required")
-        password = None
-        if password_env:
-            password = os.environ.get(password_env)
-            if password is None:
-                raise ValueError("password environment variable is not present in the server process")
+                 known_hosts: str | None, password_env: str | None,
+                 password: str | None = None, host_key_sha256: str | None = None,
+                 remember_host_key: bool = False, trust_store: Path | None = None,
+                 key_passphrase: str | None = None):
         self.client = paramiko.SSHClient()
-        host_file = Path(known_hosts).expanduser() if known_hosts else Path.home() / ".ssh" / "known_hosts"
-        if not host_file.is_file():
-            raise ValueError("known_hosts file is missing; verify the host via your SSH client first")
-        self.client.load_host_keys(str(host_file))
-        self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        stage = "connect"
+        trust = None
         try:
+            if not username:
+                raise SSHFailure("invalid_parameters", "An SSH username is required.", "error")
+            if password is not None and password_env is not None:
+                raise SSHFailure("invalid_parameters", "Choose password or password_env, not both.", "error")
+            if password_env is not None:
+                password = os.environ.get(password_env)
+                if password is None:
+                    raise SSHFailure("credentials_unavailable", "The named password variable is absent. Supply password directly or use an existing key; changing environment variables is not required.",
+                                     "needs_credentials", missing_fields=["password_or_key_file"])
+            trust = HostTrust(host, port, trust_store or Path.home() / ".ssh" / "board_console_known_hosts",
+                              known_hosts, host_key_sha256, remember_host_key)
+            self.client.set_missing_host_key_policy(trust)
+            # Explicit credentials bypass unrelated agent/default-key attempts.
+            auto_keys = password is None and key_file is None
             self.client.connect(hostname=host, port=port, username=username,
                                 key_filename=str(Path(key_file).expanduser()) if key_file else None,
-                                password=password, timeout=10, banner_timeout=10, auth_timeout=10, channel_timeout=10,
-                                allow_agent=True, look_for_keys=True)
+                                password=password, passphrase=key_passphrase,
+                                timeout=10, banner_timeout=10, auth_timeout=10, channel_timeout=10,
+                                allow_agent=auto_keys, look_for_keys=auto_keys,
+                                transport_factory=trust.transport_factory)
+            self.host_key = trust.identity
             self.client.get_transport().set_keepalive(15)
+            stage = "shell"
             self.channel = self.client.invoke_shell(term="vt100", width=120, height=40)
             self.channel.settimeout(0.2)
-        except Exception:
+        except Exception as exc:
             self.client.close()
-            raise
+            failure = classify_failure(exc, stage)
+            if trust and trust.identity:
+                failure.details["host_key"] = trust.identity
+            raise failure from None
 
     def read(self) -> bytes:
         try:

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .capture import Capture
 from .sessions import Session
+from .ssh_auth import SSHFailure, classify_failure, probe_host
 from .transports import SSHTransport, SerialTransport, serial_ports
 
 
@@ -29,6 +30,7 @@ class Manager:
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, Session] = {}
         self.lock = threading.RLock()
+        self.ssh_trust_store = self.data_dir / "ssh_known_hosts"
 
     def new(self, kind: str, metadata: dict, encoding: str) -> Session:
         codecs.lookup(encoding)
@@ -85,7 +87,10 @@ class Manager:
                     "note": "DTR/RTS were set before open, but some USB drivers may still pulse them on open"}
 
     def ssh_open(self, host: str | None, username: str | None, port: int, key_file: str | None,
-                 known_hosts: str | None, password_env: str | None, encoding: str) -> dict:
+                 known_hosts: str | None, password_env: str | None, encoding: str,
+                 password: str | None = None, host_key_sha256: str | None = None,
+                 remember_host_key: bool = False, reuse: bool = True,
+                 key_passphrase: str | None = None) -> dict:
         missing, questions = [], []
         if not host:
             missing.append("host")
@@ -96,18 +101,51 @@ class Manager:
         if missing:
             return needs_input(missing, questions)
         with self.lock:
+            if reuse:
+                for existing in self.sessions.values():
+                    info = existing.capture.info()
+                    target = info["connection"]
+                    if (existing.kind == "ssh" and existing.state in ("open", "opening") and
+                            not existing.stop.is_set() and target["host"].casefold() == host.casefold() and
+                            target["port"] == port and target["username"] == username):
+                        if existing.state == "opening":
+                            return {"status": "connecting", **existing.status(), "authentication_performed": False,
+                                    "next_action": "An SSH connection is already being established; inspect session_list before retrying."}
+                        identity = info.get("ssh_host_key", {})
+                        if host_key_sha256 is not None and identity.get("host_key_sha256") != host_key_sha256:
+                            return SSHFailure("host_key_mismatch", "The existing connection does not match the supplied fingerprint.",
+                                              "host_key_mismatch", host_key=identity).result()
+                        if existing.encoding != encoding:
+                            return {"status": "session_conflict", "session_id": existing.id,
+                                    "message": "Existing session uses a different encoding; reuse it or explicitly close/reopen."}
+                        return {"status": "already_open", **existing.status(), "host_key": identity,
+                                "authentication_performed": False, "trust_saved_this_call": False,
+                                "next_action": "Use session_exchange on this session. Supplied credentials were not tried; use reuse=false for a fresh connection."}
             session = self.new("ssh", {"host": host, "port": port, "username": username}, encoding)
         transport = None
+        started = time.monotonic()
         try:
-            transport = SSHTransport(host, username, port, key_file, known_hosts, password_env)
+            transport = SSHTransport(host, username, port, key_file, known_hosts, password_env,
+                                     password=password, host_key_sha256=host_key_sha256,
+                                     remember_host_key=remember_host_key, trust_store=self.ssh_trust_store,
+                                     key_passphrase=key_passphrase)
+            session.capture.set_info({"ssh_host_key": transport.host_key})
             session.start(transport)
         except Exception as exc:
             if transport:
                 transport.close()
-            session._finish("error", str(exc))
-            return {"status": "open_failed", **session.status(),
-                    "next_action": "Check known_hosts and existing SSH credentials; do not disable host key verification"}
-        return {"status": "opened", **session.status(), "note": "Interactive PTY; stdout/stderr are merged; no automatic exit-code detection"}
+            failure = classify_failure(exc)
+            session._finish("error", f"{failure.code}: {failure}")
+            return {**session.status(), **failure.result(),
+                    "duration_seconds": round(time.monotonic() - started, 4)}
+        return {"status": "opened", **session.status(), "host_key": transport.host_key,
+                "duration_seconds": round(time.monotonic() - started, 4),
+                "note": "Authenticated persistent PTY; use session_exchange. stdout/stderr are merged."}
+
+    def ssh_probe(self, host: str | None, port: int, known_hosts: str | None) -> dict:
+        if not host:
+            return needs_input(["host"], ["要检查哪台 SSH 主机的身份？请提供实际主机名或 IP。"])
+        return probe_host(host, port, self.ssh_trust_store, known_hosts)
 
     def capture_path(self, capture_id: str) -> Path:
         if len(capture_id) != 32 or any(c not in "0123456789abcdef" for c in capture_id):

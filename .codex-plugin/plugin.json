@@ -1,6 +1,6 @@
 {
   "name": "board-console",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "开发板串口与 SSH 调试、Linux 程序部署验证任务、日志录制和离线回放（本地开发版）",
   "skills": "./.agents/skills/",
   "mcpServers": "./.mcp.json"
