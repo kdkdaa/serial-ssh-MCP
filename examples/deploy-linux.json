@@ -1,0 +1,52 @@
+{
+  "name": "board-app deployment example",
+  "change_summary": "示例：验证修复后空输入返回 empty_input，且程序版本正确；所有路径、命令、哈希与断言必须按项目替换",
+  "shell": "posix",
+  "newline": "cr",
+  "timeout_seconds": 180,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "check prerequisites",
+      "phase": "prepare",
+      "command": "test -d /opt/board-app && test -x /etc/init.d/S99board-app && command -v sha256sum && command -v base64",
+      "timeout_seconds": 5
+    },
+    {
+      "kind": "upload",
+      "name": "publish executable",
+      "local_path": "build/board-app",
+      "remote_path": "/opt/board-app/board-app",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0755",
+      "timeout_seconds": 120
+    },
+    {
+      "kind": "command",
+      "name": "restart application",
+      "phase": "restart",
+      "command": "/etc/init.d/S99board-app restart",
+      "timeout_seconds": 10
+    },
+    {
+      "kind": "wait_ready",
+      "name": "wait for application",
+      "command": "/opt/board-app/board-app --health-json",
+      "timeout_seconds": 20,
+      "probe_timeout_seconds": 2,
+      "interval_seconds": 0.3,
+      "checks": {"exit_code": 0, "json_equals": {"/ready": true}}
+    },
+    {
+      "kind": "command",
+      "name": "verify changed behavior",
+      "phase": "verify",
+      "command": "/opt/board-app/board-app --check-empty-input-json",
+      "timeout_seconds": 5,
+      "checks": {
+        "exit_code": 0,
+        "json_equals": {"/version": "example-build-42", "/error": "empty_input"}
+      }
+    }
+  ]
+}

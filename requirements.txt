@@ -1,0 +1,5 @@
+mcp==1.30.0
+pyserial==3.5
+paramiko==5.1.0
+pydantic==2.14.3
+

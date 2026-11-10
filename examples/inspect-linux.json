@@ -1,0 +1,24 @@
+{
+  "name": "Linux identity snapshot",
+  "change_summary": "只读结构示例：确认 Linux Shell 并采集内核信息；这不验证程序修改",
+  "shell": "posix",
+  "newline": "cr",
+  "timeout_seconds": 10,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "verify Linux shell",
+      "phase": "verify",
+      "command": "uname -s; uname -r",
+      "timeout_seconds": 3,
+      "checks": {"exit_code": 0, "contains": ["Linux"]}
+    },
+    {
+      "kind": "command",
+      "name": "read kernel command line",
+      "phase": "diagnose",
+      "command": "cat /proc/cmdline",
+      "timeout_seconds": 3
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.board-console/
+.codex/config.toml
+.mcp.json
+
