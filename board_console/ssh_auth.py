@@ -64,6 +64,8 @@ def classify_failure(exc: Exception, stage: str = "connect") -> SSHFailure:
                           "SSH connection timed out." if stage == "connect" else "SSH terminal setup timed out.")
     if isinstance(exc, ConnectionRefusedError):
         return SSHFailure("connection_refused", "SSH port refused the connection.")
+    if isinstance(exc, (EOFError, ConnectionResetError, ConnectionAbortedError)):
+        return SSHFailure("connection_lost", "SSH connection ended during setup.")
     if isinstance(exc, (FileNotFoundError, PermissionError)):
         return SSHFailure("local_file_error", "A requested SSH key or local trust file is missing or inaccessible.")
     if isinstance(exc, OSError):

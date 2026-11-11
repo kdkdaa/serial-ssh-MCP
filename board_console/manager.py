@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .capture import Capture
 from .sessions import Session
-from .ssh_auth import SSHFailure, classify_failure, probe_host
+from .ssh_auth import HostTrust, SSHFailure, classify_failure, probe_host
 from .transports import SSHTransport, SerialTransport, serial_ports
 
 
@@ -118,8 +118,19 @@ class Manager:
                         if existing.encoding != encoding:
                             return {"status": "session_conflict", "session_id": existing.id,
                                     "message": "Existing session uses a different encoding; reuse it or explicitly close/reopen."}
+                        if remember_host_key:
+                            try:
+                                trust = HostTrust(host, port, self.ssh_trust_store, known_hosts,
+                                                  host_key_sha256, remember=True)
+                                key = existing.transport.client.get_transport().get_remote_server_key()
+                                trust.missing_host_key(None, trust.hostname, key)
+                                identity = trust.identity
+                                existing.capture.set_info({"ssh_host_key": identity})
+                            except Exception as exc:
+                                return {**classify_failure(exc).result(), "session_id": existing.id,
+                                        "authentication_performed": False}
                         return {"status": "already_open", **existing.status(), "host_key": identity,
-                                "authentication_performed": False, "trust_saved_this_call": False,
+                                "authentication_performed": False, "trust_saved_this_call": remember_host_key,
                                 "next_action": "Use session_exchange on this session. Supplied credentials were not tried; use reuse=false for a fresh connection."}
             session = self.new("ssh", {"host": host, "port": port, "username": username}, encoding)
         transport = None

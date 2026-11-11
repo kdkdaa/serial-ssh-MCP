@@ -1,11 +1,11 @@
 # 在另一台 Windows 电脑上安装
 
-这是 Board Console 0.3.0 源码包，包含 MCP 服务、Skill、安装脚本和说明。不包含 Python 运行环境、第三方依赖、本机 MCP 配置、SSH 凭据或设备录制数据。
+这是 Board Console 0.4.0 源码的安装说明，项目包含 MCP 服务、Skill、安装脚本和说明。此前生成的 0.3.0 ZIP 不包含 0.4 的 SSH 改动，需要使用更新后的源码。源码发行包不包含 Python 运行环境、第三方依赖、本机 MCP 配置、SSH 凭据或设备录制数据。
 
 ## 安装
 
 1. 安装 Python 3.11，并包含 Python Launcher（`py` 命令）。首次安装依赖需要访问 Python 包源。
-2. 将 ZIP 完整解压到准备长期使用的目录，例如 `D:\Tools\board-console-0.3.0`。保留 `.agents`、`.codex-plugin` 等点号开头的目录，不要直接在 ZIP 内运行脚本。
+2. 将源码完整放到准备长期使用的目录，例如 `D:\Tools\board-console`；如果来源是 ZIP，请先完整解压。保留 `.agents`、`.codex-plugin` 等点号开头的目录，不要直接在 ZIP 内运行脚本。
 3. 在解压目录打开 PowerShell，执行：
 
    ```powershell
@@ -25,7 +25,7 @@
 
 - 串口需要操作系统已识别 USB 转串口设备；用 `serial_list` 枚举，再确认目标端口和波特率，不要照搬其他电脑的 COM 编号。
 - 打开连接后，使用 `session_exchange` 发送命令或字节并读取反馈。详细参数见 `docs/interaction.md`。
-- SSH 使用新电脑上已有的认证方式和经过核实的 known_hosts，不复制他人的 SSH 凭据。
+- SSH 可通过 ssh_open 的 password 或现有密钥登录，无需修改环境变量；首次主机身份可用 ssh_probe 查看并确认，之后保存到插件的信任文件。详见 `docs/ssh.md`，不复制他人的 SSH 凭据。
 - 同一设备只交给一个服务实例使用，避免项目 MCP 与插件 MCP 同时占用串口。
 
 ## 工程位置与迁移

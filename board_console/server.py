@@ -367,4 +367,9 @@ def build_server(workspace: Path, data_dir: Path) -> FastMCP:
         """Direct text/byte relay, persistent terminal context and response semantics."""
         return (Path(__file__).resolve().parents[1] / "docs" / "interaction.md").read_text(encoding="utf-8")
 
+    @mcp.resource("board-console://ssh")
+    def ssh_guide() -> str:
+        """Password authentication, explicit host trust, reuse and classified SSH failures."""
+        return (Path(__file__).resolve().parents[1] / "docs" / "ssh.md").read_text(encoding="utf-8")
+
     return mcp

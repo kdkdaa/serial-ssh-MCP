@@ -25,6 +25,16 @@ description: 使用 Board Console MCP 直接向持续串口或 SSH 会话发送�
 - 不默认选第一个/唯一串口，不默认猜 115200，不主动轮询波特率。可先读取用户指定项目的 UART 配置或硬件文档，说明来源。
 - 确定端口和波特率后，调用 `serial_open`；SSH 使用实际 host、username 和现有认证。默认串口参数 8N1/UTF-8，可根据资料覆盖；DTR/RTS 默认为 false，但部分驱动打开时仍可能跳变。
 
+## SSH 认证在 MCP 内完成
+
+- `ssh_open` 支持一次性 password、key_file、key_passphrase、现有 SSH agent/默认密钥；password_env 仅是兼容选项。不要求用户修改环境变量，也不因密码登录而默认调用系统 ssh 或搜索 Xshell 数据。
+- 已有可信记录时直接 open；首次连接可先 `ssh_probe(host, port)`，不传密码。收到 `needs_host_key_confirmation` 时核对返回的指纹，复用用户已明确确认的身份信息；没有确认时向用户展示问题，不自行接受探测结果。
+- 确认后传 `host_key_sha256` 和 `remember_host_key=true`。保存后同一主机后续无需重复确认；`host_key_changed` 必须单独处理，不自动覆盖旧密钥或关闭校验。
+- `already_open` 表示复用已有终端，没有验证此次传入的密码；显式要验证新认证方式时使用 `reuse=false`。`connecting` 表示同目标正在连接，先查询状态，不重复发起登录。
+- 按 `error_code` 区分认证、身份、网络和本地文件问题；密码错误不循环重试，未知能力不默认扩展为外部客户端排查。仅在用户要求或确实遇到不支持的认证方式时考虑替代客户端，并分开报告其结果。
+- 密码和私钥口令只交给认证参数，不写终端命令、计划、报告或输出。宿主可能记录工具参数，不能承诺全链路不留痕；插件自己的录制与配置不保存这些认证参数。
+- 字段和错误说明见 `board-console://ssh` 或 [SSH 指南](../../../docs/ssh.md)。
+
 ## 持续会话
 
 - `serial_open` / `ssh_open` 启动后台采集，自动保存原始 RX/TX、时间戳和事件。复用 `session_id`，不为每次读取重新连接。

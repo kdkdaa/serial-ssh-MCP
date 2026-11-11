@@ -84,7 +84,13 @@ class SSHTransport:
                                 allow_agent=auto_keys, look_for_keys=auto_keys,
                                 transport_factory=trust.transport_factory)
             self.host_key = trust.identity
-            self.client.get_transport().set_keepalive(15)
+            connection = self.client.get_transport()
+            if connection is None or not connection.is_active():
+                raise SSHFailure("connection_lost", "SSH connection ended before opening the terminal.")
+            if not connection.is_authenticated():
+                raise SSHFailure("authentication_incomplete", "Server requires additional authentication; arbitrary interactive MFA is not supported.",
+                                 "needs_credentials")
+            connection.set_keepalive(15)
             stage = "shell"
             self.channel = self.client.invoke_shell(term="vt100", width=120, height=40)
             self.channel.settimeout(0.2)

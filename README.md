@@ -1,6 +1,8 @@
-# Board Console 0.3
+# Board Console 0.4
 
 给 coding Agent 使用的本地 MCP 开发板调试插件。无需固定协议：通过持续串口或 SSH 会话收日志、发命令、等待输出，再结合源码分析；每次连接自动录制，支持断开设备后的离线回放。
+
+0.4 补齐 MCP 内的 SSH 登录流程：一次性密码、主机指纹探测与确认保存、已有会话复用，以及认证/主机身份/网络错误分类。无需通过环境变量传递密码或绕到 Xshell。新增 SSH 流程尚未运行验证，详见 [SSH 指南](docs/ssh.md)。
 
 0.3 将直接交互作为主要入口：Agent 给出命令或字节，`session_exchange` 在同一会话原样发送并收取反馈；MCP 不检查设备命令语法、不包装 Shell、不自动纠错，由 Agent 解释输出和决定下一步。0.2 的部署与断言任务层保留为可选能力。0.3 已完成 RK3566 串口基础交互实测，具体边界见文末。
 
@@ -79,13 +81,14 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 
 ## 工具索引
 
-当前源码注册 26 个工具。0.2 的任务提交/等待已有基础只读命令实测；0.3 的 `session_exchange` 已完成 RK3566 串口基础交互实测。
+当前源码注册 27 个工具。0.2 的任务提交/等待已有基础只读命令实测；0.3 的 `session_exchange` 已完成 RK3566 串口基础交互实测；0.4 的 SSH 改动仅经静态核验。
 
 | 工具 | 用途 |
 | --- | --- |
 | `connection_prepare` | 只检查连接信息，不连接；缺失时返回 needs_input |
 | `serial_list` / `serial_open` | 枚举 USB 身份、打开持续串口 |
-| `ssh_open` | 打开持续 SSH 交互终端 |
+| `ssh_probe` | 只做 SSH 主机密钥探测与信任检查，不登录或保存 |
+| `ssh_open` | 密码/密钥认证、确认主机信任，打开或复用持续 SSH 终端 |
 | `session_list` / `session_read` | 查看会话、按游标读取增量事件 |
 | `session_exchange` | 主要交互入口：原样发送并收取原始输出；省略 data 可续读 |
 | `session_send` / `console_run` | 原始收发或发送命令并等待字面量输出 |
@@ -100,7 +103,7 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 | `task_status` / `task_wait` | 任务状态、断言、耗时与失败摘要；单次等待最多 30 秒 |
 | `task_events` / `task_cancel` | 任务时间线、请求取消；取消不回滚 |
 
-还有 `board-console://guide` 提供调试 Skill、`board-console://interaction` 提供直接交互说明、`board-console://tasks` 提供可选任务说明。
+还有 `board-console://guide` 提供调试 Skill、`board-console://interaction` 提供直接交互说明、`board-console://ssh` 提供 SSH 登录说明、`board-console://tasks` 提供可选任务说明。
 
 文本发送不隐式添加换行；`console_run` 必须指定 `newline=lf/cr/crlf/none`。hex 模式将结束符直接写进 hex。匹配是字面量，不支持正则；不会解释 ANSI 控制序列，也不提供完整 TUI 屏幕。
 
@@ -110,7 +113,11 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 
 ## SSH
 
-初版使用 Paramiko，在 Windows 原生运行，不依赖本地 PTY。使用实际 host、username；认证使用现有密钥/SSH agent，或通过 `password_env` 指定**服务进程已有的环境变量名**。密码不作为工具参数传递。默认读取用户 `.ssh/known_hosts`，也可显式指定路径；未知或变化的主机密钥会被拒绝，需先通过正常 SSH 流程核实指纹。
+使用 Paramiko，在 Windows 原生运行，不依赖本地 PTY。`ssh_open` 使用实际 host、username，支持直接传入一次性 `password`、现有 `key_file` / SSH agent，以及加密私钥的 `key_passphrase`。`password_env` 保留为已有配置的兼容选项，不要求修改环境变量。插件不把认证参数写入录制或配置，但宿主客户端可能记录工具参数。
+
+首次连接可先用 `ssh_probe` 检查身份；没有可信记录时返回 `needs_host_key_confirmation` 和指纹。用户确认后，向 `ssh_open` 传入完整 `host_key_sha256` 和 `remember_host_key=true`，在认证前校验并保存到 `.board-console/ssh_known_hosts`。默认同时读取已有用户 `.ssh/known_hosts`，也可用 `known_hosts` 选择其他 OpenSSH 格式文件。主机密钥变化单独报告，不自动覆盖。
+
+同 host/port/username 默认复用已有终端，保留目录等状态。`already_open` 不代表验证了本次传入的密码；需要重新认证时显式设置 `reuse=false`。认证失败、DNS 解析、拒绝连接、超时等由 `error_code` 区分，不再全部归为笼统的凭据问题。使用方式及状态表见 [docs/ssh.md](docs/ssh.md)。
 
 尚不自动读取 OpenSSH `Host` 别名、ProxyJump、ProxyCommand，也没有跳板机支持。终端会合并 stdout/stderr；底层 `console_run` 不自动返回命令退出码，0.2 任务层通过独立 Shell 标记获取退出码。SFTP 文件工具使用远程绝对 POSIX 路径。
 
@@ -124,7 +131,7 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 
 单次录制在原始字节、文本与事件开销的累计估算达到 256 MiB 时停止并报告错误；数据库实际文件可能更大。暂未实现自动轮转。每次查询有输出预算，避免把全部日志塞进模型上下文。它是初版调试采集器，尚未验证高速持续流量下的丢字节情况，不能作为高吞吐采集仪的保证。
 
-录制包含终端原始输入输出，不做字节级脱敏，也不加密；不要通过 session_send 输入需要保密的密码，SSH 登录应使用现有认证机制。MCP 进程结束会释放连接，磁盘录制保留；不保证跨进程保持会话或在 Agent 结束后自动唤醒它。
+录制包含终端原始输入输出，不做字节级脱敏，也不加密；不要通过 session_send 输入需要保密的密码，SSH 登录应使用 ssh_open 的认证参数或现有密钥。认证发生在终端采集前，插件不保存密码或私钥口令。MCP 进程结束会释放连接，磁盘录制保留；不保证跨进程保持会话或在 Agent 结束后自动唤醒它。
 
 ## 和编译、烧录配合
 
@@ -152,6 +159,8 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 后续 0.2 基础命令实测通过：同一任务执行 `ifconfig` 约 31 毫秒，执行 `pwd; cd Project && pwd && ls -la` 约 32 毫秒，任务耗时约 63 毫秒。`ifconfig` 退出码为 0 但输出为空；`/Project` 成功列出 MediaApp、配置文件、lib 和 logs。独立客户端含启动、连接、关闭共约 1.66 秒。证据为 `.board-console/reports/basic-commands-1794291441951612000.json`。这不验证上传、程序重启、JSON 断言、任务取消或持久化去重。
 
 0.3 开发阶段通过 Python 语法、配置、接口签名与 Skill 格式核验；随后经用户授权，使用 `session_exchange` 在同一串口会话逐条执行 `cd /`、`ls`、`cd Project`、`ls`，四次服务端收发耗时分别为 125、141、125、141 毫秒，合计 532 毫秒，含每次 100 毫秒静默窗口，确认目录状态跨调用保留。之后完成只读网络配置查询，并原样返回缺少 `/etc/resolv.conf` 的设备错误。证据分别为 `.board-console/reports/direct-navigation-1794293455326-responses.jsonl` 和 `network-config-1794293775855-responses.jsonl`；源码发行包不包含这些录制与本机报告。续读边界、发送失败、SSH 和新电脑安装仍未实测，不能用上述结果承诺所有设备的性能。
+
+0.4 本轮仅做 Python 语法、接口签名、配置和 Skill 静态核验，未连接 SSH 主机、运行测试、保存实际信任记录或使用真实密码。此前生成的 0.3.0 ZIP 保持原样，不包含 0.4 改动。
 
 ## 实现参考
 
