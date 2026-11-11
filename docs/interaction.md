@@ -50,6 +50,7 @@
 | `session_state` / `error` | 会话状态与采集/传输异常；设备命令错误仍保留在 rx_text 中 |
 | `completion` | 始终 unknown；直接通道不推断退出码或执行成功 |
 | `duration_seconds` | 本次发送与收取在服务端的总耗时，不是纯设备执行时间 |
+| `diagnostics` | 累计收发、最近活动、输入目标、输出来源及主机进程退出码；不推断板端就绪 |
 
 单次默认最多扫描 128 个事件，最多可设为 256；RX 文本 UTF-8 字节数与 hex 字符数合计限制为 64 KiB。到达上限后返回游标，原始录制继续进行。解码跨接收块的字符可能在下次返回才完整出现，以原始 hex 为准。
 
@@ -57,7 +58,7 @@
 
 ## 适用范围与可选任务层
 
-直接通道不绑定操作系统。Linux/Windows 终端必须已经通过支持的串口或 SSH 连接暴露；STM32 必须已有串口通信接口。MCP 不凭空提供 Windows 本地终端、JTAG、SWD 或芯片烧录能力。SSH PTY 合并 stdout/stderr，可能做终端转换；需要原始二进制链路时使用串口。
+直接通道不绑定操作系统。Linux/Windows 终端可通过串口或 SSH 暴露；STM32 必须已有串口通信接口。0.6 的 `process_open` 可启动本机 Shell、监视器或已安装的烧录工具，使用管道而非 PTY；不会凭空提供 JTAG/SWD 驱动或通用烧录算法。SSH PTY 合并 stdout/stderr，可能做终端转换；需要原始二进制链路时使用串口。专用工具会话的输入目标和退出信息见 [进程说明](processes.md)。
 
 `task_*` 是可选的 POSIX 部署/断言执行层，仍有自己的计划格式、哈希和验证约束。它会使用独立 `sh -c` 与完成标记，不具备跨步骤 cd 状态；不要把它当作手工终端的默认入口。直接通道既不要求计划，也不执行这些检查。
 
@@ -65,8 +66,8 @@
 
 ## 宿主直接接入
 
-正常路径是 `Agent → 已加载的 MCP 工具 → 设备`。项目已经提供 `.codex/config.toml` 和 `.mcp.json`；读取源码和临时启动 SDK 客户端是开发核验手段，不应成为每次设备操作的路径。
+正常路径是 `Agent → Codex 用户级注册的 MCP 工具 → 设备`。setup 将服务注册到用户配置，任意项目使用相同工具，不依赖进入插件目录。临时 SDK 客户端仅用于插件开发核验，不作为日常操作路径。
 
-依据 [官方 MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=app)，项目配置需要信任项目；桌面客户端可以在 Settings → MCP servers 中管理服务，保存后选择 Restart，并通过 `/mcp` 查看连接。本项目配置指向已有虚拟环境与 launch.py，使用 STDIO，不需要外层 PowerShell。
+依据 [官方 MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=app)，用户级配置可跨项目加载；在 Settings → MCP servers 重载服务。服务直接由 Python 启动并使用 STDIO，不需要外层 PowerShell。默认继承宿主工作目录，`server_status` 可查看实际上下文。
 
-只有宿主实际提供 `session_exchange` 等工具并能调用，才算直接接入成功。2026-11-10 检查时项目已被信任、配置存在，但当前聊天工具目录未暴露 Board Console，也没有可调用的 MCP 重载工具；因此不能声称本次已经解决宿主加载问题。
+只有宿主实际提供工具并可调用，才算接入成功。2026-11-11 已定位旧安装仅注册在插件工程，改为用户级注册；重载后应调用 `server_status` 确认 0.5.0。不同实例的 session_id 不互通，连接失败不启动第二个客户端绕过；先确认工具加载、当前会话和端口占用。

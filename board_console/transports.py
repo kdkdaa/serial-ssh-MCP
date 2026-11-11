@@ -43,11 +43,13 @@ class SerialTransport:
     def write(self, data: bytes) -> int:
         return self.port.write(data)
 
-    def control(self, dtr: bool | None, rts: bool | None) -> None:
+    def control(self, dtr: bool | None, rts: bool | None, reapply_dtr_after_rts: bool = False) -> None:
         if dtr is not None:
             self.port.dtr = dtr
         if rts is not None:
             self.port.rts = rts
+            if reapply_dtr_after_rts:
+                self.port.dtr = self.port.dtr  # usbser SET_CONTROL_LINE_STATE workaround.
 
     def close(self) -> None:
         self.port.close()

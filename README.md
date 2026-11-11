@@ -1,12 +1,18 @@
-# Board Console 0.4
+# Board Console 0.6
 
 给 coding Agent 使用的本地 MCP 开发板调试插件。无需固定协议：通过持续串口或 SSH 会话收日志、发命令、等待输出，再结合源码分析；每次连接自动录制，支持断开设备后的离线回放。
+
+0.6 增加持续主机工具进程会话：项目专用启动入口、错误输出和后续交互都留在 MCP 内。板卡文件可声明启动配方，ESP32-P4X 通过项目 `idf.cmd` 启动 monitor；新增分步控制线、USB 身份重连及收发/退出状态。MCP 提供接口和证据，Agent 决定调试步骤。新增能力仅完成静态核验，未运行测试或连接实板，见 [专用工具说明](docs/processes.md)。
+
+0.5 默认注册到 Codex 用户级配置，在任意项目提供同一组工具，不再要求进入插件工程。Codex 直接启动 STDIO 服务；日常操作不需要 PowerShell/CMD 转发。板卡配置全局共享，会话由各服务进程独立持有，录制按宿主工作目录分区。`server_status` 返回实际版本、工作目录和数据位置，便于识别加载与上下文问题。
 
 0.4 补齐 MCP 内的 SSH 登录流程：一次性密码、主机指纹探测与确认保存、已有会话复用，以及认证/主机身份/网络错误分类。无需通过环境变量传递密码或绕到 Xshell。新增 SSH 流程尚未运行验证，详见 [SSH 指南](docs/ssh.md)。
 
 0.3 将直接交互作为主要入口：Agent 给出命令或字节，`session_exchange` 在同一会话原样发送并收取反馈；MCP 不检查设备命令语法、不包装 Shell、不自动纠错，由 Agent 解释输出和决定下一步。0.2 的部署与断言任务层保留为可选能力。0.3 已完成 RK3566 串口基础交互实测，具体边界见文末。
 
 在其他电脑安装请先阅读 [INSTALL.md](INSTALL.md)。源码包不包含本机虚拟环境、绝对路径配置和录制数据，由新电脑上的安装脚本重新生成环境与配置。
+
+特殊板卡的连接与转发参数放在独立的 `boards/*.json` 中，现有 `esp32-p4x-j19` 配置。Agent 通过 `board_profiles` 发现文件，再用 `connection_prepare(profile_id=...)` 获取连接参数和行结束符；不包含固件命令，后续板卡新增文件即可。详见 [板卡配置与扩展](docs/boards.md)。本次新增能力仅静态核验，未进行实板连接验证。
 
 ## 日常交互：一次调用发送并读取
 
@@ -29,7 +35,7 @@
 - 游标读取、字面量等待、跨块文本/字节匹配，超时和断连分开报告。
 - SQLite 保存双向原始字节、增量解码文本、时间戳和生命周期事件；关键词搜索与按原始时间/快速离线回放。
 - 本地工作区文件读取，以及 SSH SFTP 远程文件读取。
-- 项目 MCP 配置和 `.agents/skills/board-console/SKILL.md` 调试流程。
+- 用户级 MCP 注册和 `board-console://guide` 调试流程资源；不要求每个项目安装 Skill。
 - 后台任务独占会话写操作，最多 4 个并发任务；提交 ID 去重、查询、等待与取消。
 - SSH SFTP / Linux 串口分块上传，核对 SHA-256 后替换目标文件；命令唯一边界与真实退出码；文本及 JSON 字段断言。
 - 任务计划、步骤耗时、断言与失败证据持久化；异常停止，不自动重复上传或回滚。
@@ -52,13 +58,13 @@ Agent 使用 `task_wait` 等待结果，仅在失败或需要判断时分析证�
 .\setup.ps1
 ```
 
-脚本只安装依赖和生成本地连接配置，不连接硬件、不运行测试。依赖已安装时可用 `-SkipDependencies`。它会保留其他 MCP 设置；已有同名配置不同则停止并要求检查，不覆盖。
+脚本安装依赖并写入用户级连接配置，不连接硬件、不运行测试。依赖已安装时可用 `-SkipDependencies`。它保留其他 MCP 设置，识别并迁移本安装生成的旧项目注册；遇到无法识别的同名配置时保留并报错。
 
-生成的 `.codex/config.toml` 注册项目级 `board_console` MCP。根据 [官方配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=app)，项目需要被信任；桌面客户端可在 Settings → MCP servers 中管理服务并选择 Restart，使用 `/mcp` 查看连接状态。MCP 注册配置不等于启动或接入成功，宿主必须实际提供 `session_exchange`、`serial_open` 等工具。本机配置直接启动 Python 服务，不需要外层 PowerShell。
+注册位置为 `$CODEX_HOME/config.toml`，未设置时为 `~/.codex/config.toml`，不修改环境变量。根据 [官方配置说明](https://learn.chatgpt.com/docs/extend/mcp?surface=app)，用户级 MCP 设置可跨项目使用；桌面客户端在 Settings → MCP servers 中重载服务。注册不等于当前聊天已经加载新工具，实际调用 `server_status` 确认版本 0.5.0、工作目录和数据路径，再进行连接。
 
-2026-11-10 本次检查：项目已被信任、配置存在，但当前聊天仍未提供 Board Console 工具，且没有可调用的重载工具。未确认宿主加载缺口的具体原因。此前独立 SDK 客户端的成功不等于原生工具接入；不要将临时客户端脚本作为日常操作方案。
+2026-11-11 已定位此前跨项目缺口：安装脚本只写插件工程的项目级配置，用户级没有 Board Console。本次改为用户级注册并移除本安装的旧覆盖项。已有聊天是否刷新工具目录仍需宿主重载后确认；独立 SDK 客户端成功不等于原生工具接入成功。
 
-`.mcp.json` 是其他本地 MCP 客户端/兼容插件格式的配置；`.codex-plugin/plugin.json` 提供本地开发版清单。生成配置包含本机绝对路径，**目前不是可直接分发到另一台机器的安装包**。移动项目或换机器后需检查原配置并重新执行 setup。项目 MCP 与插件模式二选一，不要启动两个实例抢占同一串口。
+`.mcp.json` 用于其他支持 STDIO 的客户端，`.codex-plugin/plugin.json` 提供插件清单。Codex 用户级注册与重复导入同一个插件二选一，不要让两个实例争用同一串口。生成配置包含本机绝对路径，换机器需执行 setup；无需在业务项目复制插件或配置。
 
 不需要 OpenAI API Key；由已有 coding Agent 调用这些工具。
 
@@ -81,11 +87,14 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 
 ## 工具索引
 
-当前源码注册 27 个工具。0.2 的任务提交/等待已有基础只读命令实测；0.3 的 `session_exchange` 已完成 RK3566 串口基础交互实测；0.4 的 SSH 改动仅经静态核验。
+当前源码注册 33 个工具。历史 RK3566 基础交互已有实测；ESP32-P4X 曾确认 COM22 可打开但持续未收到字节。0.5 已核对用户级注册；这些历史结果不验证 0.6 新增接口。运行中的旧 MCP 进程不会自动加载修改后的 Python 代码，需重载后以 `server_status.version` 确认版本。
 
 | 工具 | 用途 |
 | --- | --- |
-| `connection_prepare` | 只检查连接信息，不连接；缺失时返回 needs_input |
+| `server_status` | 查看当前加载版本、工作目录、数据目录和本实例会话 |
+| `board_profiles` | 列出或读取独立板卡连接文件，不访问硬件 |
+| `connection_prepare` | 可按 profile_id 合并板卡参数并返回 open_args；缺失时返回 needs_input，不连接 |
+| `board_startup_prepare` / `process_open` | 准备板卡专用启动参数、持有工具进程，统一收发与录制 |
 | `serial_list` / `serial_open` | 枚举 USB 身份、打开持续串口 |
 | `ssh_probe` | 只做 SSH 主机密钥探测与信任检查，不登录或保存 |
 | `ssh_open` | 密码/密钥认证、确认主机信任，打开或复用持续 SSH 终端 |
@@ -94,6 +103,7 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 | `session_send` / `console_run` | 原始收发或发送命令并等待字面量输出 |
 | `session_expect` | 从指定游标等待文本/hex，最长 30 秒 |
 | `session_interrupt` / `serial_control` | Ctrl+C 或明确设置控制线 |
+| `serial_sequence` / `serial_reconnect` | 显式控制线步骤、按 USB 身份重连，不重发旧命令 |
 | `session_close` | 停止采集、释放连接、保留录制 |
 | `capture_list` / `capture_read` / `capture_search` | 历史录制分页读取与关键词检索 |
 | `capture_replay` | 只读离线回放；speed=1 原始时间，0 尽快回放 |
@@ -125,7 +135,7 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 
 ## 录制与回放
 
-默认位置：`.board-console/captures/<capture_id>.sqlite3`，已加入 Git 忽略。每个录制包含连接参数、USB 身份（可获取时）、编码、RX/TX 字节和事件。`time_ns` 是 Unix 时间，`elapsed_ns` 是本会话单调时钟的相对时间。
+用户级安装的录制位于 `<Codex用户目录>/board-console/projects/<工作目录路径哈希>/captures/<capture_id>.sqlite3`，不写业务源码目录。哈希按解析后的绝对路径计算，Windows 统一大小写；它不是权限隔离。同工作目录的历史录制可见，活连接仅属于各服务进程。每个录制包含连接参数、USB 身份、编码、RX/TX 字节和事件。`time_ns` 是 Unix 时间，`elapsed_ns` 是本会话单调时钟的相对时间。手动指定 `--data-dir` 或不使用 `--state-root` 时兼容原 `.board-console` 数据位置；旧录制不自动搬迁。
 
 回放读取启动回放时已有的事件快照。新的 replay session 可用同样的 read/expect 工具，TX 只展示历史记录，绝不重新发送到真机。录制中的 TX 自动重发、协议对端模拟、MCU 仿真均未包含在 0.2 中；任务计划是单独提交的操作流程。
 
@@ -167,5 +177,5 @@ MCP 返回的 `questions` 不会自己弹出对话框。服务 instructions、�
 - [MCP Python SDK v1 文档](https://py.sdk.modelcontextprotocol.io/v1/)：初版固定使用 1.30.0 维护分支。
 - [pySerial API](https://pyserial.readthedocs.io/en/latest/pyserial_api.html)：串口、超时和控制线。
 - [Paramiko Client API](https://docs.paramiko.org/en/stable/api/client.html)：SSH、PTY 与 SFTP。
-- [Codex MCP 配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)：项目级 MCP 配置。
+- [Codex MCP 配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)：用户级和项目级 MCP 配置。
 

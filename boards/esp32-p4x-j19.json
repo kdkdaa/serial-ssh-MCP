@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "name": "ESP32-P4X J19 USB Serial/JTAG",
+  "description": "本地 ESP32P4 工程当前 P4X EV 板配置；不代表所有 ESP32-P4 固件的连接设置。",
+  "connector": "J19 原生 USB Serial/JTAG，使用操作系统枚举的串口",
+  "connection": {
+    "transport": "serial",
+    "baudrate": 115200,
+    "bytesize": 8,
+    "parity": "N",
+    "stopbits": 1,
+    "dtr": false,
+    "rts": false,
+    "rtscts": false
+  },
+  "forwarding": {
+    "encoding": "utf-8",
+    "data_format": "text",
+    "newline": "cr"
+  },
+  "startups": {
+    "idf_monitor": {
+      "description": "通过项目自己的 idf.cmd 激活其工具链并启动 monitor --no-reset。要求已存在项目描述，不替项目构建或安装依赖。",
+      "platforms": ["win32"],
+      "argv": [
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & $env:BOARD_CONSOLE_ENTRY '-p' $env:BOARD_CONSOLE_PORT '-b' $env:BOARD_CONSOLE_BAUD 'monitor' '--no-reset'; exit $LASTEXITCODE"
+      ],
+      "env": {
+        "BOARD_CONSOLE_ENTRY": "{project_dir}/idf.cmd",
+        "BOARD_CONSOLE_PORT": "{port}",
+        "BOARD_CONSOLE_BAUD": "{baudrate}",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "required_files": ["idf.cmd", "build/project_description.json"],
+      "input_target": "tool_control",
+      "input_notes": "本机已安装 IDF Monitor 1.10.0 的管道输入是工具控制语言，必须用 LF 结束工具命令。send <内容> 让 monitor 向设备发送一行；reset 调用 monitor 的芯片复位流程；exit 退出。它不支持任意原始字节直通，原始二进制请关闭 monitor 后用 serial_open。其他 monitor 版本需要先核对其输入支持；未知命令错误由 Agent 分析。不要直接发送固件命令或把 Ctrl+C 字节当成本机进程信号。"
+    }
+  },
+  "notes": [
+    "实际串口号由当前电脑枚举并确认，不使用文档中的历史 COM21 自动连接。",
+    "关闭占用同一端口的串口监视器后再连接。打开端口可能产生驱动控制线跳变，不自动复位。",
+    "会话保持后台接收；只读日志时不发送 data，也不附加换行。",
+    "重启或烧录后可能需要重新枚举端口；不自动重发之前的输入。",
+    "需要项目专用启动时调用 board_startup_prepare，选择 idf_monitor，并传入真实 project_dir 和 port；当前项目的 idf.cmd 负责选择 ESP-IDF/Python 环境。",
+    "原始串口不依赖 ESP-IDF 激活；打开串口、启动 monitor、收到设备输出、功能验证成功是不同证据。0 字节时先看启动错误和连接身份，再决定是否复位。",
+    "启动配方显式使用 --no-reset；需要复位时由 Agent 根据授权明确向 monitor 发送 reset，不自动尝试控制线组合。"
+  ],
+  "sources": [
+    "ESP32P4/BOARD_ESP32P4X.md：USB 烧录与控制台 J19",
+    "ESP32P4/sdkconfig.rev3.local：CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y，CONFIG_MONITOR_BAUD=115200",
+    "ESP32P4/README.md：普通串口助手发送行结束符 CR",
+    "ESP32P4/idf.cmd：项目级 SDK 与 Python 环境入口",
+    "esp_idf_monitor 1.10.0/base/command_reader.py：非 TTY 管道命令输入"
+  ]
+}

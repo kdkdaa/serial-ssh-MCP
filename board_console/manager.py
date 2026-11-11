@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .capture import Capture
 from .sessions import Session
+from .process_transport import ProcessTransport
 from .ssh_auth import HostTrust, SSHFailure, classify_failure, probe_host
 from .transports import SSHTransport, SerialTransport, serial_ports
 
@@ -51,6 +52,84 @@ class Manager:
                 raise ValueError("unknown session_id; sessions do not survive MCP restart, captures do")
             return self.sessions[session_id]
 
+    def port_owner(self, port: str) -> Session | None:
+        for session in self.sessions.values():
+            target = session.connection.get("port") if session.kind == "serial" else session.connection.get("resource_port")
+            if (target and target.casefold() == port.casefold() and
+                    (session.state in ("open", "opening") or session.cleanup_error or
+                     (session.thread and session.thread.is_alive()))):
+                return session
+        return None
+
+    def process_open(self, argv: list[str], cwd: str | None, env: dict[str, str | None],
+                     encoding: str, resource_port: str | None, input_target: str,
+                     required_files: list[str]) -> dict:
+        directory = (self.workspace / cwd).resolve() if cwd else self.workspace
+        absent = [str(directory / path) for path in required_files if not (directory / path).is_file()]
+        if absent:
+            return {"status": "missing_prerequisites", "missing_files": absent, "started": False}
+        with self.lock:
+            owner = self.port_owner(resource_port) if resource_port else None
+            if owner:
+                return {"status": "resource_busy", "session_id": owner.id, "resource_port": resource_port,
+                        "next_action": "Explicitly close the owning session before starting another tool on this port."}
+            metadata = {"argv": argv, "cwd": str(directory), "environment_keys": sorted(env),
+                        "resource_port": resource_port, "input_target": input_target,
+                        "required_files": required_files}
+            session = self.new("process", metadata, encoding)
+            transport = None
+            try:
+                transport = ProcessTransport(argv, directory, env)
+                session.start(transport)
+            except Exception as exc:
+                if transport:
+                    transport.close()
+                session._finish("error", str(exc))
+                return {"status": "start_failed", **session.status()}
+        return {"status": "started", **session.status(),
+                "next_action": "Read startup output with session_exchange; process creation is not tool/device readiness.",
+                "note": "Input goes unchanged to tool stdin. Pipes are not a PTY; tool syntax/buffering may differ."}
+
+    def serial_reconnect(self, session_id: str, port: str | None, timeout_seconds: float) -> dict:
+        if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 15:
+            raise ValueError("timeout_seconds must be 0..15")
+        old = self.get(session_id)
+        if old.kind != "serial":
+            raise ValueError("serial_reconnect requires a serial session; reopen other transports explicitly")
+        settings = old.connection
+        identity = settings.get("usb") or {}
+        identifiable = bool(identity.get("serial_number") and identity.get("vid") is not None and identity.get("pid") is not None)
+        if not identifiable and not port:
+            return needs_input(["port"], ["原连接没有唯一 USB 序列号，请确认重连端口。"], candidates=serial_ports())
+        if not old.operation_lock.acquire(blocking=False):
+            return {"status": "busy", "session_id": old.id}
+        try:
+            closed = old.close()
+            if closed["status"] != "closed":
+                return closed
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                candidates = serial_ports()
+                matches = [p for p in candidates if
+                           (not port or p["port"].casefold() == port.casefold()) and
+                           (not identifiable or all(p.get(k) == identity.get(k) for k in ("vid", "pid", "serial_number")))]
+                if len(matches) == 1:
+                    chosen = matches[0]["port"]
+                    result = self.serial_open(chosen, settings["baudrate"], settings["bytesize"],
+                                              settings["parity"], settings["stopbits"], old.encoding,
+                                              settings["dtr"], settings["rts"], settings["rtscts"])
+                    return {**result, "previous_session_id": old.id, "usb_identity_verified": identifiable,
+                            "resent_bytes": 0}
+                if len(matches) > 1:
+                    return needs_input(["port"], ["同一 USB 身份匹配多个接口，请明确端口。"], candidates=matches)
+                if time.monotonic() >= deadline:
+                    return {"status": "device_not_found", "previous_session_id": old.id,
+                            "expected_usb": identity, "candidates": candidates, "resent_bytes": 0,
+                            "next_action": "Check enumeration/identity, then call reconnect again; no write was retried."}
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+        finally:
+            old.operation_lock.release()
+
     def serial_open(self, port: str | None, baudrate: int | None, bytesize: int, parity: str,
                     stopbits: float, encoding: str, dtr: bool, rts: bool, rtscts: bool) -> dict:
         missing, questions = [], []
@@ -65,9 +144,18 @@ class Manager:
                                defaults={"bytesize": bytesize, "parity": parity, "stopbits": stopbits,
                                          "dtr": dtr, "rts": rts, "encoding": encoding})
         with self.lock:
+            owner = self.port_owner(port)
+            if owner and (owner.kind != "serial" or owner.stop.is_set()):
+                return {"status": "resource_busy", "session_id": owner.id,
+                        "next_action": "Close the owning session and wait for release before opening the port."}
             for existing in self.sessions.values():
                 info = existing.capture.info()
                 if existing.kind == "serial" and existing.state in ("open", "opening") and info["connection"]["port"].casefold() == port.casefold():
+                    requested = {"baudrate": baudrate, "bytesize": bytesize, "parity": parity,
+                                 "stopbits": stopbits, "dtr": dtr, "rts": rts, "rtscts": rtscts}
+                    if existing.encoding != encoding or any(info["connection"].get(k) != v for k, v in requested.items()):
+                        return {"status": "session_conflict", **existing.status(), "connection": info["connection"],
+                                "next_action": "Existing serial settings differ; explicitly close before changing settings."}
                     return {"status": "already_open", **existing.status(), "connection": info["connection"],
                             "next_action": "reuse this session, or explicitly close it before changing settings"}
             metadata = {"port": port, "baudrate": baudrate, "bytesize": bytesize, "parity": parity,

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from .capture import Capture
+from .process_transport import ProcessExited
 
 LOG = logging.getLogger(__name__)
 
@@ -31,6 +32,10 @@ class Session:
         self.thread = None
         self.task_id = None
         self.requires_reconnect = False
+        self.cleanup_error = None
+        self.connection = capture.info().get("connection", {})
+        self.byte_counts = {"rx": 0, "tx": 0}
+        self.last_activity_ns = {"rx": None, "tx": None}
         self.decoders = {k: codecs.getincrementaldecoder(encoding)(errors="replace") for k in ("rx", "tx")}
 
     def record(self, kind: str, data: bytes = b"", details: dict | None = None, text: str | None = None) -> int:
@@ -38,6 +43,9 @@ class Session:
             if text is None:
                 text = self.decoders[kind].decode(data) if kind in self.decoders else ""
             seq = self.capture.append(kind, data, text, time.monotonic_ns() - self.started_ns, details or {})
+            if kind in self.byte_counts and data:
+                self.byte_counts[kind] += len(data)
+                self.last_activity_ns[kind] = time.time_ns()
             self.condition.notify_all()
             return seq
 
@@ -66,7 +74,11 @@ class Session:
                 LOG.exception("Unable to finalize capture %s", self.id)
             try:
                 # Even a full event budget should leave an explicit terminal state.
-                self.capture.set_info({"state": state, "error": error, "ended_time_ns": time.time_ns()})
+                info = {"state": state, "error": error, "ended_time_ns": time.time_ns(),
+                        "rx_bytes": self.byte_counts["rx"], "tx_bytes": self.byte_counts["tx"]}
+                if self.kind == "process" and self.transport:
+                    info["process"] = self.transport.status()
+                self.capture.set_info(info)
             except Exception:
                 LOG.exception("Unable to save terminal state %s", self.id)
             self.condition.notify_all()
@@ -78,16 +90,25 @@ class Session:
                 data = self.transport.read()
                 if data:
                     self.record("rx", data)
+        except ProcessExited as exc:
+            if not self.stop.is_set():
+                state = "completed" if exc.returncode == 0 else "error"
+                error = None if exc.returncode == 0 else str(exc)
+                self.record("process_exit", details={"exit_code": exc.returncode})
+                self.capture.set_info({"exit_code": exc.returncode})
         except Exception as exc:
             if not self.stop.is_set():
                 state, error = "error", f"{type(exc).__name__}: {exc}"
+                self.requires_reconnect = self.kind in ("serial", "ssh")
         finally:
             self.stop.set()
             with self.write_lock:
                 try:
                     self.transport.close()
-                except Exception:
+                except Exception as exc:
                     LOG.exception("Unable to close transport %s", self.id)
+                    state, error = "error", f"transport cleanup failed: {exc}"
+                    self.cleanup_error = str(exc)
                 self._finish("error" if self.error else state, self.error or error)
 
     def start_replay(self, source_path: Path, speed: float, source_last_cursor: int) -> None:
@@ -138,7 +159,15 @@ class Session:
             return {"session_id": self.id, "capture_id": self.id, "kind": self.kind, "state": self.state,
                     "error": self.error, "last_cursor": self.capture.last_cursor(),
                     "capture_path": str(self.capture.path), "read_only": self.kind == "replay",
-                    "task_id": self.task_id, "requires_reconnect": self.requires_reconnect}
+                    "task_id": self.task_id, "requires_reconnect": self.requires_reconnect,
+                    "cleanup_error": self.cleanup_error,
+                    "rx_bytes": self.byte_counts["rx"], "tx_bytes": self.byte_counts["tx"],
+                    "last_rx_time_ns": self.last_activity_ns["rx"],
+                    "last_tx_time_ns": self.last_activity_ns["tx"],
+                    "output_source": "host_tool_stdout_stderr" if self.kind == "process" else "transport",
+                    "input_target": self.connection.get("input_target", "device"),
+                    "device_ready": "unknown",
+                    "process": self.transport.status() if self.kind == "process" and self.transport else None}
 
     def read(self, after: int, limit: int, wait_seconds: float) -> dict:
         if not math.isfinite(wait_seconds) or not 0 <= wait_seconds <= 30:
@@ -177,6 +206,7 @@ class Session:
                 self.record("tx", chunk[:count])
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
+            self.requires_reconnect = self.kind in ("serial", "ssh")
             self.stop.set()
             # Some drivers cannot report how many bytes reached the peer on failure.
             # Never retry automatically: the command may already have taken effect.
@@ -261,20 +291,55 @@ class Session:
         return self._send(b"\x03")
 
     def control(self, dtr: bool | None, rts: bool | None) -> dict:
+        result = self.control_sequence([{"dtr": dtr, "rts": rts, "delay_seconds": 0}], False)
+        return {**result, "dtr": dtr, "rts": rts}
+
+    def control_sequence(self, steps: list[dict], reapply_dtr_after_rts: bool) -> dict:
         if self.kind != "serial" or self.state != "open":
             raise ValueError("serial control lines require an open serial session")
-        if dtr is None and rts is None:
-            raise ValueError("specify dtr or rts explicitly")
+        if not 1 <= len(steps) <= 32:
+            raise ValueError("provide 1..32 control steps")
+        duration = 0
+        for step in steps:
+            if set(step) - {"dtr", "rts", "delay_seconds"}:
+                raise ValueError("step fields are dtr, rts and delay_seconds")
+            for key in ("dtr", "rts"):
+                if step.get(key) is not None and type(step[key]) is not bool:
+                    raise ValueError("control levels must be booleans")
+            delay = step.get("delay_seconds", 0)
+            if not isinstance(delay, (int, float)) or not math.isfinite(delay) or not 0 <= delay <= 5:
+                raise ValueError("step delay_seconds must be 0..5")
+            if step.get("dtr") is None and step.get("rts") is None and delay == 0:
+                raise ValueError("each step must set a level or wait")
+            duration += delay
+        if duration > 10:
+            raise ValueError("total control sequence delay must not exceed 10 seconds")
         if not self.operation_lock.acquire(blocking=False):
             return {"status": "busy"}
+        applied = 0
+        before = None
         try:
+            before = self.capture.last_cursor()
             with self.write_lock:
-                if self.stop.is_set():
-                    raise ValueError("session is stopping")
-                self.record("control_requested", details={"dtr": dtr, "rts": rts})
-                self.transport.control(dtr, rts)
-                self.record("control_applied", details={"dtr": dtr, "rts": rts})
-            return {"status": "applied", "dtr": dtr, "rts": rts}
+                for step in steps:
+                    if self.stop.is_set():
+                        raise ValueError("session is stopping")
+                    self.record("control_requested", details={**step, "reapply_dtr_after_rts": reapply_dtr_after_rts})
+                    self.transport.control(step.get("dtr"), step.get("rts"), reapply_dtr_after_rts)
+                    self.record("control_applied", details=step)
+                    applied += 1
+                    if self.stop.wait(step.get("delay_seconds", 0)):
+                        raise ValueError("session stopped during control sequence")
+            return {"status": "applied", "steps_applied": applied, "cursor_before_control": before,
+                    "device_ready": "unknown"}
+        except Exception as exc:
+            self.requires_reconnect = True
+            try:
+                self.record("control_error", details={"error": str(exc), "steps_applied": applied})
+            except Exception:
+                LOG.exception("Unable to record control failure")
+            return {"status": "control_error", "error": str(exc), "steps_applied": applied,
+                    "cursor_before_control": before, "delivery_uncertain": True, "retry_safe": False}
         finally:
             self.operation_lock.release()
 
@@ -284,4 +349,11 @@ class Session:
             self.thread.join(timeout=4)
         if self.thread and self.thread.is_alive():
             return {**self.status(), "status": "closing", "message": "reader is still stopping"}
+        if self.cleanup_error and self.transport:
+            try:
+                self.transport.close()
+                self.cleanup_error = None
+            except Exception as exc:
+                self.cleanup_error = str(exc)
+                return {**self.status(), "status": "close_failed", "message": "transport release is not confirmed"}
         return {**self.status(), "status": "closed"}
