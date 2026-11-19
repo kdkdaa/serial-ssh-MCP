@@ -73,29 +73,36 @@ class BoardProfile(Model):
 
 
 class Profiles:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, overrides: Path | None = None):
         self.directory = directory.resolve()
+        self.overrides = overrides.resolve() if overrides is not None else None
 
     def read(self, profile_id: str) -> dict:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", profile_id):
             raise ValueError("profile_id must be a lowercase file stem, not a path")
-        path = (self.directory / f"{profile_id}.json").resolve()
-        if not path.is_relative_to(self.directory):
+        directory = self.directory
+        if self.overrides is not None and (self.overrides / f"{profile_id}.json").exists():
+            directory = self.overrides
+        path = (directory / f"{profile_id}.json").resolve()
+        if not path.is_relative_to(directory):
             raise ValueError("profile must stay inside the profiles directory")
         # Re-read on each request: adding/editing a profile needs no server restart.
         profile = BoardProfile.model_validate_json(path.read_text(encoding="utf-8"))
-        return {"profile_id": profile_id, **profile.model_dump(exclude_none=True)}
+        return {"profile_id": profile_id, "profile_path": str(path), **profile.model_dump(exclude_none=True)}
 
     def list(self) -> dict:
         entries, errors = [], []
-        for path in sorted(self.directory.glob("*.json")):
+        names = {p.stem for p in self.directory.glob("*.json")}
+        if self.overrides is not None:
+            names.update(p.stem for p in self.overrides.glob("*.json"))
+        for name in sorted(names):
             try:
-                profile = self.read(path.stem)
+                profile = self.read(name)
                 entries.append({key: profile[key] for key in
                                 ("profile_id", "name", "description", "connector", "connection")})
                 entries[-1]["startups"] = list(profile["startups"])
             except (ValueError, LookupError, OSError) as exc:
-                errors.append({"profile_id": path.stem, "error_type": type(exc).__name__})
+                errors.append({"profile_id": name, "error_type": type(exc).__name__})
         return {"status": "ok", "profiles": entries, "errors": errors}
 
     def prepare_startup(self, profile_id: str, startup: str, project_dir: str | None,

@@ -79,14 +79,38 @@ def watch_parent(parent_pid: int):
     threading.Thread(target=wait, daemon=True).start()
 
 
-if __name__ == "__main__":
+def main(argv: list[str]) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     try:
         job = windows_job() if os.name == "nt" else None
-        watch_parent(int(sys.argv[1]))
-        child = subprocess.Popen(sys.argv[2:], stdin=sys.stdin.buffer,
+        watch_parent(int(argv[0]))
+        # Frozen Windows applications alter the DLL search directory. External
+        # SDK programs must use their own DLLs, not the MCP bundle's libraries.
+        if getattr(sys, "frozen", False) and os.name == "nt":
+            import ctypes
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+            api.SetDllDirectoryW.restype = ctypes.c_int
+            if not api.SetDllDirectoryW(None):
+                raise ctypes.WinError(ctypes.get_last_error())
+        environment = os.environ.copy()
+        if getattr(sys, "frozen", False) and os.name != "nt":
+            for key in ("LD_LIBRARY_PATH", "LIBPATH"):
+                original = environment.pop(key + "_ORIG", None)
+                if original is None:
+                    environment.pop(key, None)
+                else:
+                    environment[key] = original
+        child = subprocess.Popen(argv[1:], stdin=sys.stdin.buffer, env=environment,
                                  stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
         code = child.wait()
     except Exception as exc:
         print(f"process supervisor: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         code = 127
-    sys.exit(code if code >= 0 else 128 - code)
+    return code if code >= 0 else 128 - code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

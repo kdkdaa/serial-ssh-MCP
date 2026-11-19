@@ -1,48 +1,74 @@
-# 在另一台 Windows 电脑上安装
+# Board Console 0.7 安装与升级
 
-这是 Board Console 0.6.0 源码的安装说明。默认把 MCP 注册到 Codex 用户配置，在任意项目使用同一组工具。此前 ZIP 不包含本次改动，应使用更新后的源码；发行包不包含虚拟环境、本机配置、SSH 凭据或录制数据。
+MCP 由 Agent 通过 STDIO 按需启动，一个进程持有自己的连接。每次命令复用原有连接，不启动新 MCP；宿主结束时释放连接和工具进程。不安装常驻服务，不跨聊天共享连接，不修改永久环境变量。
 
-## 安装
+当前仓库已经提供独立发布包的构建与安装源码；0.7 尚未构建发布包，也未验证新安装流程。源码模式仍需要本机 Python。下面的免 Python 安装流程仅适用于维护者实际构建出的目录式发布包。
 
-1. 安装 Python 3.11，并包含 Python Launcher（`py` 命令）。首次安装依赖需要访问 Python 包源。
-2. 将源码完整放到准备长期使用的目录，例如 `D:\Tools\board-console`；如果来源是 ZIP，请先完整解压。保留 `.agents`、`.codex-plugin` 等点号开头的目录，不要直接在 ZIP 内运行脚本。
-3. 在解压目录打开 PowerShell，执行：
+## 使用独立发布包
 
-   ```powershell
-   .\setup.ps1
-   ```
+1. 完整解压发布目录，保留 `board-console.exe`、`_internal/`、`release.json` 和 `install.ps1`。
+2. 在发布目录执行 `./install.ps1`。默认安装到 `%LOCALAPPDATA%/Programs/BoardConsole/versions/<版本>/`，校验清单中的文件后注册 Codex 用户级 MCP。
+3. 第一次从其他安装位置迁移时，脚本可能保留并拒绝覆盖旧同名配置。明确要替换该注册时使用 `./install.ps1 -ReplaceExisting`。后续由新安装器登记过的版本可根据安装记录识别并升级。
+4. 保留 `enabled`、超时、工具过滤、环境变量及其他用户设置。若原配置禁用该服务器，安装不会自动启用它。
+5. 下次宿主启动 MCP 时使用新注册的可执行文件。正在运行的会话继续使用原版本，不在安装时强制停止或接管连接。实际加载版本以 `server_status.version` 为准。
 
-   如果当前 PowerShell 执行策略阻止运行脚本，可仅对这次安装进程使用：
+发布程序包含其 Python 与依赖。用户无需安装 Python、pip、uv 或 PyInstaller；日常启动不安装依赖、不联网更新、不改 PATH。设备驱动及 ESP-IDF 等项目工具链仍由对应项目准备，不与 MCP 的运行时混用。
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
-   ```
+安装采用版本目录，不覆盖运行中的旧程序。同版本文件内容不一致时拒绝覆盖，应发布新版本。旧版本不自动删除，确认相关 Agent 会话结束后再清理；用户录制和板卡扩展不在版本目录中。安装记录、Codex 配置及 `.mcp.json` 分别原子替换，不保证多个文件构成一次事务；写入失败应保留已安装文件并重新执行安装。
 
-4. 脚本创建 `.venv`、安装依赖，把 `board_console` 写入已有 `$CODEX_HOME/config.toml`（未设置时为 `~/.codex/config.toml`），保留其他设置，不修改环境变量。自动移除本安装生成的旧项目级同名注册，另生成 `.mcp.json` 供其他客户端使用。安装不连接硬件。
-5. 宿主重新加载 Board Console 后，在业务项目调用 `server_status`，确认版本 0.6.0 及实际 workspace，再调用板卡/连接工具。运行中的旧进程不会自动更新 Python 代码；工具目录刷新以实际返回为准。无需进入插件目录或给每个项目复制配置。用户级注册后不再重复导入同名插件。
+## 从源码开发
 
-## 首次使用
+1. 准备 Python 3.11 和 Python Launcher。
+2. 在源码目录执行 `./setup.ps1`：创建项目 `.venv`、安装 requirements，再注册用户级 MCP。已有环境可用 `-SkipDependencies` 仅执行配置更新。
+3. 安装位置迁移且明确替换旧注册时，使用 `-ReplaceExisting`。同位置重复安装不会因为已有 `enabled=true` 而失败。
 
-- 串口需要操作系统已识别 USB 转串口设备；用 `serial_list` 枚举，再确认目标端口和波特率，不要照搬其他电脑的 COM 编号。
-- 保留安装目录的 `boards/`。特殊板卡可通过 `board_profiles` 选择独立连接文件，再调用 `connection_prepare(profile_id=...)`；文件不含本机端口或凭据，扩展方式见 `docs/boards.md`。
-- 打开连接后，使用 `session_exchange` 发送命令或字节并读取反馈。详细参数见 `docs/interaction.md`。
-- SSH 可通过 ssh_open 的 password 或现有密钥登录，无需修改环境变量；首次主机身份可用 ssh_probe 查看并确认，之后保存到插件的信任文件。详见 `docs/ssh.md`，不复制他人的 SSH 凭据。
-- 同一设备只交给一个服务实例使用，避免项目 MCP 与插件 MCP 同时占用串口。
+源码模式仍依赖源码目录和本机基础 Python，不能把 `.venv` 当作独立发布包搬到其他电脑。已有调用路径 `python launch.py --state-root ...` 保持兼容。`python launch.py --version` 与 `python launch.py configure` 使用轻量入口，不导入完整 MCP/SSH 服务。
 
-## 工程位置与迁移
+`python launch.py configure --check`（发布版为 `board-console.exe configure --check`）仅检查注册结果并列出将变动的文件，不写配置、不启动 MCP 或访问硬件。
 
-全局配置只固定 Python、launch.py 和用户数据根目录，不固定 `cwd` 或 `--workspace`。启动器使用宿主实际传入的工作目录作为项目上下文；板卡文件始终从安装目录读取。连接时显式传串口或 SSH 主机，会话 ID 仅在创建它的服务进程有效，不跨聊天复用。
+## 维护者构建发布包
 
-录制、任务记录及本插件保存的 SSH 信任记录位于用户数据根目录中按工作目录绝对路径哈希划分的目录。切换项目无需重新安装；同一串口不能被多个进程同时打开，冲突会返回打开失败，不抢占。目录分区不是安全沙箱，同项目不同聊天可查看同目录的历史录制。
+这是显式构建步骤，Agent 正常启动不会执行。先在构建环境安装 `requirements.txt` 中的依赖和 PyInstaller（本配方按 6.22 系列接口编写），再执行：
 
-`server_status.workspace` 是实际值，不假定所有客户端都会正确传入项目目录。第三方宿主若不传项目上下文，应配置其启动工作目录；通信本身不依赖源码目录。`workspace_read` 和可选任务上传仍限制在实际 workspace，其他源码优先由 Agent 的项目文件工具读取。通用使用说明通过 `board-console://guide` 提供，无需在业务项目安装 Skill。
+```powershell
+./scripts/build-release.ps1
+```
 
-宿主使用的项目目录必须存在。工程搬迁后，旧聊天如果仍绑定已删除目录，需要在宿主中使用有效工程目录；全局注册不会修复宿主的失效工作目录。
+产物位于 `dist/board-console/`，可整体压缩发布。使用目录式打包以避免单文件启动时解包；worker 通过打包程序自身的内部入口启动，不再调用目标电脑的 Python。构建脚本生成文件 SHA-256 清单，并读取产物版本；这不代替新机器安装、运行或硬件验证。
 
-安装完成后不要直接搬动 `.venv` 和绝对路径配置。换机器后从源码重新安装；迁移安装位置时检查用户级旧注册。脚本只自动迁移能明确识别为本安装旧版本的条目，未知的同名配置会保留并报错。
+当前构建配方面向 Windows，不是跨平台二进制发行。直接依赖已有固定版本，完整的可复现构建锁定与发布验证仍需在正式发行前完成。
 
-## 已验证范围
+## 项目与实例隔离
 
-已在本开发电脑通过独立 MCP 客户端完成 RK3566 串口交互，包括 cd /、ls、cd Project、ls 的跨调用目录状态，以及只读网络配置查询。新电脑的安装、原生客户端接入、SSH、Windows 远端终端和 STM32 自定义协议尚未实测；部署上传和程序重启也未完成实板验证。
+全局注册固定程序入口及用户数据根目录，不固定业务项目路径。项目上下文默认取宿主提供的工作目录，也可明确提供 `--workspace`；它不是安全沙箱。`server_status` 返回 workspace、project_data_dir、instance_id 和实际 data_dir。
 
-本包提供 Windows 安装脚本，尚未提供经过验证的 Linux/macOS 安装流程。它不是包含全部依赖的离线安装包，也不是双击即用的 EXE。
+默认数据结构：
+
+```text
+用户数据根目录/
+  boards/                         用户板卡扩展
+  projects/<工作目录哈希>/
+    ssh_known_hosts               此项目已确认的 SSH 主机身份
+    instances/<随机实例ID>/
+      instance.json
+      captures/
+      tasks/
+```
+
+每次 MCP 启动创建新实例目录。session_id、task_id 和 task_start 的 request_id 在当前实例内使用；不跨实例复用、恢复或重放。新实例不继承旧实例的请求去重记录，不能在不检查实际设备状态的情况下重新提交旧部署。历史任务保留在原实例目录供文件工具读取。
+
+`capture_list()` 默认只列当前实例，`scope="project"` 可显式查看本项目的历史录制，包括 0.6 的旧目录。历史 capture_id 可以用于 read/search/replay，但不能用于控制连接。非本实例的活动记录显示 owner_unknown，表示未知，不能据此声称另一个聊天已断线。
+
+会话结束后关闭 SQLite 写入连接，后续查询临时以只读方式打开。当前实例最多保留约 128 个最近结束的会话对象，旧会话从内存回收后使用 capture 工具查询录制。日志仍使用原有单录制预算；本次没有改成日志轮转或无损无限采集。
+
+多个聊天同时连接同一串口时，各自独立调用；操作系统返回占用错误，不共享连接、不抢占、不终止其他软件。SSH 会话同样由各自实例持有。
+
+## 板卡与项目工具
+
+内置板卡位于程序资源目录。通过 `--state-root` 注册时，用户板卡默认位于该根目录的 `boards/`；也可用 `--profiles-dir` 指定。用户同名文件覆盖内置默认值，无效覆盖文件返回配置错误，不静默回退。版本升级不覆盖用户板卡。
+
+ESP32 的 monitor、烧录器等由项目入口选择环境，使用 process_open 后继续通过统一会话接口收发。说明见 `docs/processes.md`。连接所需的 COM 口、SSH 主机等由 Agent 根据实际项目确认，不写进通用安装包。
+
+## 本次核验边界
+
+0.6 的日常使用已由用户反馈测试正常。0.7 的实例布局、安装入口、冻结 worker 与句柄回收只做静态检查；未构建、未安装发布包、未运行测试或操作实板，也未重载当前 Codex 会话。

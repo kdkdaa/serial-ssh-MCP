@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -16,6 +17,7 @@ class Capture:
         self.max_bytes = max_bytes
         self.used_bytes = 0
         self.readonly = metadata is None
+        self.closed = False
         if self.readonly:
             self.db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, check_same_thread=False)
         else:
@@ -32,15 +34,39 @@ class Capture:
             self.set_info(metadata)
         self.db.row_factory = sqlite3.Row
 
+    @contextmanager
+    def access(self):
+        with self.lock:
+            if self.closed:
+                raise ValueError("capture is closed")
+            temporary = self.db is None
+            if temporary:
+                self.db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, check_same_thread=False)
+                self.db.row_factory = sqlite3.Row
+            try:
+                yield
+            finally:
+                if temporary:
+                    self.db.close()
+                    self.db = None
+
+    def release_writer(self) -> None:
+        """Ended sessions keep cursor/read support without holding SQLite handles."""
+        with self.lock:
+            if self.db is not None:
+                self.db.close()
+                self.db = None
+            self.readonly = True
+
     def set_info(self, values: dict) -> None:
-        with self.lock, self.db:
+        with self.access(), self.db:
             self.db.executemany(
                 "INSERT OR REPLACE INTO info VALUES (?, ?)",
                 [(k, json.dumps(v, ensure_ascii=False)) for k, v in values.items()],
             )
 
     def info(self) -> dict:
-        with self.lock:
+        with self.access():
             result = {r[0]: json.loads(r[1]) for r in self.db.execute("SELECT * FROM info")}
             result["last_cursor"] = self.last_cursor()
             result["path"] = str(self.path)
@@ -49,7 +75,7 @@ class Capture:
     def append(self, kind: str, data: bytes, text: str, elapsed_ns: int, details: dict) -> int:
         detail_json = json.dumps(details, ensure_ascii=False)
         size = len(data) + len(text.encode("utf-8")) + len(detail_json.encode("utf-8")) + 128
-        with self.lock:
+        with self.access():
             if self.used_bytes + size > self.max_bytes:
                 raise RuntimeError("capture_limit_reached: recording stopped; open a new session")
             with self.db:
@@ -61,7 +87,7 @@ class Capture:
             return int(cursor.lastrowid)
 
     def last_cursor(self) -> int:
-        with self.lock:
+        with self.access():
             return self.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
 
     def rx_tail(self, at: int, length: int, binary: bool = False):
@@ -70,7 +96,7 @@ class Capture:
             return b"" if binary else ""
         column = "data" if binary else "text"
         parts, count = [], 0
-        with self.lock:
+        with self.access():
             for row in self.db.execute(
                 f"SELECT {column} FROM events WHERE seq <= ? AND kind = 'rx' AND length({column}) > 0 ORDER BY seq DESC",
                 (at,),
@@ -85,7 +111,7 @@ class Capture:
     def page(self, after: int = 0, limit: int = 64, byte_budget: int = 32768) -> dict:
         if after < 0 or not 1 <= limit <= 256:
             raise ValueError("cursor must be >= 0; limit must be 1..256")
-        with self.lock:
+        with self.access():
             last = self.last_cursor()
             if after > last:
                 raise ValueError("cursor exceeds this capture's last_cursor")
@@ -115,7 +141,7 @@ class Capture:
             raise ValueError("query must contain 1..1024 characters")
         if after < 0 or not 1 <= scan_limit <= 4096 or not 1 <= match_limit <= 100:
             raise ValueError("invalid cursor or search limits")
-        with self.lock:
+        with self.access():
             last = self.last_cursor()
             if after > last:
                 raise ValueError("cursor exceeds this capture's last_cursor")
@@ -140,4 +166,7 @@ class Capture:
 
     def close(self) -> None:
         with self.lock:
-            self.db.close()
+            if self.db is not None:
+                self.db.close()
+                self.db = None
+            self.closed = True

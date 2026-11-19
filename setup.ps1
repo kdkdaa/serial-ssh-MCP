@@ -1,4 +1,4 @@
-param([switch]$SkipDependencies)
+param([switch]$SkipDependencies, [switch]$ReplaceExisting)
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 Push-Location -LiteralPath $projectRoot
@@ -12,7 +12,9 @@ try {
         & $pythonPath -m pip install --only-binary=:all: -r (Join-Path $projectRoot 'requirements.txt') --disable-pip-version-check
         if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
     }
-    & $pythonPath (Join-Path $projectRoot 'scripts\configure.py')
+    $configureArgs = @((Join-Path $projectRoot 'scripts\configure.py'))
+    if ($ReplaceExisting) { $configureArgs += '--replace-existing' }
+    & $pythonPath @configureArgs
     if ($LASTEXITCODE -ne 0) { throw 'MCP configuration failed; existing settings were preserved.' }
 } finally {
     Pop-Location

@@ -4,4 +4,6 @@ __pycache__/
 .board-console/
 .codex/config.toml
 .mcp.json
+build/
+dist/
 

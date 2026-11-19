@@ -6,9 +6,10 @@ import os
 import queue
 import signal
 import subprocess
-import sys
 import threading
 from pathlib import Path
+
+from .runtime import worker_command
 
 
 class ProcessExited(EOFError):
@@ -40,10 +41,7 @@ class ProcessTransport:
         self.close_lock = threading.Lock()
         self.closed = False
         self.process = subprocess.Popen(
-            # Use the real interpreter, not Windows' venv redirector: the owned PID
-            # must be the supervisor holding the Job handle, not a launcher parent.
-            [getattr(sys, "_base_executable", sys.executable), "-I", "-u", "-X", "utf8",
-             str(Path(__file__).with_name("process_worker.py")), str(os.getpid()), *argv],
+            [*worker_command(), *argv],
             cwd=cwd, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, bufsize=0, start_new_session=os.name != "nt",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,

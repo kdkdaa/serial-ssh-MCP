@@ -81,6 +81,7 @@ class Session:
                 self.capture.set_info(info)
             except Exception:
                 LOG.exception("Unable to save terminal state %s", self.id)
+            self.capture.release_writer()
             self.condition.notify_all()
 
     def _receive(self) -> None:

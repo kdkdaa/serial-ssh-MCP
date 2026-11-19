@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import codecs
+import json
 import math
+import os
 import threading
 import time
 import uuid
@@ -26,21 +28,34 @@ def needs_input(fields: list[str], questions: list[str], **context) -> dict:
 class Manager:
     def __init__(self, workspace: Path, data_dir: Path):
         self.workspace = workspace.resolve()
-        self.data_dir = data_dir.resolve()
+        self.project_data_dir = data_dir.resolve()
+        self.instance_id = uuid.uuid4().hex
+        self.data_dir = self.project_data_dir / "instances" / self.instance_id
         self.capture_dir = self.data_dir / "captures"
         self.capture_dir.mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "instance.json").write_text(json.dumps({
+            "instance_id": self.instance_id, "pid": os.getpid(), "workspace": str(self.workspace),
+            "created_time_ns": time.time_ns(), "lifecycle": "owned by the Agent stdio connection",
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
         self.sessions: dict[str, Session] = {}
         self.lock = threading.RLock()
-        self.ssh_trust_store = self.data_dir / "ssh_known_hosts"
+        # Keep explicitly confirmed trust across launches; never share live sessions.
+        self.ssh_trust_store = self.project_data_dir / "ssh_known_hosts"
 
     def new(self, kind: str, metadata: dict, encoding: str) -> Session:
         codecs.lookup(encoding)
-        if sum(s.state in ("open", "opening") for s in self.sessions.values()) >= 8:
+        active = lambda s: s.state in ("open", "opening") or s.cleanup_error or (s.thread and s.thread.is_alive())
+        ended = [s for s in self.sessions.values() if not active(s) and s.task_id is None]
+        for previous in ended[:-127]:
+            previous.capture.close()
+            del self.sessions[previous.id]
+        if sum(bool(active(s)) for s in self.sessions.values()) >= 8:
             raise ValueError("at most 8 live sessions; close an existing session first")
         capture_id = uuid.uuid4().hex
         capture = Capture(self.capture_dir / f"{capture_id}.sqlite3", {
             "format_version": 1, "capture_id": capture_id, "kind": kind, "encoding": encoding,
             "state": "opening", "created_time_ns": time.time_ns(), "connection": metadata,
+            "instance_id": self.instance_id, "workspace": str(self.workspace),
         })
         session = Session(capture, kind, encoding)
         self.sessions[capture_id] = session
@@ -249,10 +264,15 @@ class Manager:
     def capture_path(self, capture_id: str) -> Path:
         if len(capture_id) != 32 or any(c not in "0123456789abcdef" for c in capture_id):
             raise ValueError("invalid capture_id; use capture_list")
-        path = self.capture_dir / f"{capture_id}.sqlite3"
-        if not path.is_file():
+        name = f"{capture_id}.sqlite3"
+        paths = [self.capture_dir / name, self.project_data_dir / "captures" / name]
+        paths.extend(self.project_data_dir.glob(f"instances/*/captures/{name}"))
+        matches = {p.resolve() for p in paths if p.is_file() and p.resolve().is_relative_to(self.project_data_dir)}
+        if not matches:
             raise ValueError("capture not found")
-        return path
+        if len(matches) != 1:
+            raise ValueError("duplicate capture ID in project history")
+        return matches.pop()
 
     @contextmanager
     def capture(self, capture_id: str):
@@ -267,22 +287,32 @@ class Manager:
             finally:
                 capture.close()
 
-    def captures(self, offset: int, limit: int) -> dict:
+    def captures(self, offset: int, limit: int, scope: str = "instance") -> dict:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("offset must be >= 0; limit must be 1..100")
-        paths = sorted(self.capture_dir.glob("*.sqlite3"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        if scope not in ("instance", "project"):
+            raise ValueError("scope must be instance or project")
+        paths = list(self.capture_dir.glob("*.sqlite3"))
+        if scope == "project":
+            paths += list(self.project_data_dir.glob("instances/*/captures/*.sqlite3"))
+            paths += list((self.project_data_dir / "captures").glob("*.sqlite3"))
+        paths = sorted({p.resolve() for p in paths if p.resolve().is_relative_to(self.project_data_dir)},
+                       key=lambda p: p.stat().st_mtime_ns, reverse=True)
         items = []
         for path in paths[offset:offset + limit]:
             try:
                 with self.capture(path.stem) as capture:
                     info = capture.info()
+                    info["owned_by_this_instance"] = path.stem in self.sessions
                     if path.stem not in self.sessions and info.get("state") in ("open", "opening"):
-                        info["state"] = "interrupted"
-                        info["note"] = "No live session in this server; capture may come from an interrupted process"
+                        info["recorded_state"] = info["state"]
+                        info["state"] = "owner_unknown"
+                        info["note"] = "Historical evidence only; this instance does not know whether its owner is alive."
                     items.append(info)
             except Exception as exc:
                 items.append({"capture_id": path.stem, "error": str(exc)})
-        return {"captures": items, "next_offset": offset + len(items), "has_more": offset + len(items) < len(paths)}
+        return {"captures": items, "scope": scope, "instance_id": self.instance_id,
+                "next_offset": offset + len(items), "has_more": offset + len(items) < len(paths)}
 
     def replay(self, capture_id: str, speed: float) -> dict:
         if not math.isfinite(speed) or not 0 <= speed <= 100:

@@ -21,10 +21,10 @@ from .tasks import Tasks
 from .transports import serial_ports
 
 
-def build_server(workspace: Path, data_dir: Path) -> FastMCP:
+def build_server(workspace: Path, data_dir: Path, profiles_dir: Path | None = None) -> FastMCP:
     manager = Manager(workspace, data_dir)
     tasks = Tasks(manager)
-    profiles = Profiles(Path(__file__).resolve().parents[1] / "boards")
+    profiles = Profiles(Path(__file__).resolve().parents[1] / "boards", profiles_dir)
 
     @asynccontextmanager
     async def lifespan(server):
@@ -101,7 +101,9 @@ def build_server(workspace: Path, data_dir: Path) -> FastMCP:
         with manager.lock:
             return {"status": "ok", "version": __version__,
                     "workspace": str(manager.workspace), "data_dir": str(manager.data_dir),
+                    "project_data_dir": str(manager.project_data_dir), "instance_id": manager.instance_id,
                     "profiles_dir": str(profiles.directory),
+                    "user_profiles_dir": str(profiles.overrides) if profiles.overrides else None,
                     "capabilities": ["serial", "ssh", "process_pipes", "board_startup_prepare",
                                      "serial_sequence", "serial_reconnect", "capture_replay"],
                     "session_scope": "this MCP server process; IDs do not survive restart",
@@ -376,9 +378,14 @@ def build_server(workspace: Path, data_dir: Path) -> FastMCP:
         return manager.get(session_id).close()
 
     @tool(True)
-    def capture_list(offset: int = 0, limit: int = 20) -> dict:
-        """List persistent captures, including recordings from earlier MCP processes."""
-        return manager.captures(offset, limit)
+    def capture_list(offset: int = 0, limit: int = 20,
+                     scope: Literal["instance", "project"] = "instance") -> dict:
+        """List this instance's captures; scope=project also lists earlier/other recordings.
+
+        Historical captures grant no connection ownership. owner_unknown means live state
+        is unknown, not disconnected. Read/replay a historical capture by its capture_id.
+        """
+        return manager.captures(offset, limit, scope)
 
     @tool(True)
     def capture_read(capture_id: str, after: int = 0, limit: int = 64) -> dict:
