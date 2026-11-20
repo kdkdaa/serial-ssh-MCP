@@ -2,7 +2,7 @@
 
 每种明确的板卡接口配置放在安装目录 `boards/<profile_id>.json`。文件描述连接、原始转发，以及可选的主机工具启动配方；不保存固件命令、命令校验规则、密码、主机信任或本机 COM 口。文件名就是调用 ID；使用小写字母、数字、下划线或连字符，最多 80 字符。
 
-0.7 另支持用户扩展目录：使用 `--state-root` 时默认为其 `boards/`，或显式 `--profiles-dir`。同名用户文件优先，返回的 profile_path 表明实际来源；无效覆盖返回错误，不回退到其他板卡配置。安装升级只替换内置资源，不改用户扩展。
+支持用户扩展目录：使用 `--state-root` 时默认为其 `boards/`，或显式 `--profiles-dir`。同名用户文件优先，返回的 profile_path 表明实际来源；无效覆盖返回错误，不回退到其他板卡配置。安装升级只替换内置资源，不改用户扩展。
 
 ## Agent 调用
 
@@ -17,7 +17,7 @@
 
 ## 添加板卡
 
-新增一个 JSON 文件即可，无需修改 Python、增加型号判断或注册专用工具。示例结构：
+在用户扩展目录新增 `<profile_id>.json` 即可；贡献通用配置时放入仓库 `boards/`。无需修改 Python、增加型号判断或注册专用工具。先从板卡手册或项目配置确认接口、波特率、编码与换行符，未知参数留待 Agent 询问。示例结构：
 
 ```json
 {
@@ -40,10 +40,31 @@
 - `notes` 和 `sources` 是连接说明及参数依据，不是可执行步骤。不保存命令列表，不进行协议封装，不自动登录、探测、复位或重发。
 - 可选 `startups` 声明主机工具入口，由 `board_startup_prepare` 准备，再显式 `process_open` 启动；其参数和输入边界见 [专用工具说明](processes.md)。文件本身不会自动执行。
 
-新增或修改 JSON 后，下一次工具调用就会重新读取；不缓存文件。首次加入本功能的 Python 代码需要宿主重新加载 MCP 才能暴露新增工具。`--workspace` 改为其他代码工程不影响读取安装目录下的 `boards/`；迁移或打包时保留整个目录。
+新增或修改 JSON 后，下一次工具调用就会重新读取；不缓存文件。先调用 `board_profiles(profile_id="你的文件名")` 检查配置，再调用 `connection_prepare` 核对生成的参数，最后在确认设备后连接。`--workspace` 改为其他代码工程不影响读取安装目录下的 `boards/`；迁移或打包时保留整个目录。
 
 配置结构错误通过 MCP 返回；列表里的 `errors` 标识无效文件，不妨碍列出其他有效配置。这里只检查连接配置字段，设备输入的语法、命令是否存在、业务是否成功均由 Agent 判断。未支持的物理传输（例如 SWD）不能仅靠新增 JSON 获得支持。
 
 ## ESP32-P4X
 
-`esp32-p4x-j19.json` 对应本地 ESP32P4 项目的 P4X EV / J19 USB Serial/JTAG 配置。它不包含历史 COM21，不包含固件内部命令，也不通用于其他 UART 控制台配置。0.6 加入 `idf_monitor` 启动配方，通过明确的 project_dir 找项目 `idf.cmd`；新配方仅完成静态核验，未连接或复位实板。
+`esp32-p4x-j19.json` 对应本地 ESP32P4 项目的 P4X EV / J19 USB Serial/JTAG 配置。它不包含本机串口号或固件内部命令，也不通用于其他 UART 控制台配置。`idf_monitor` 配方通过明确的 project_dir 找项目 `idf.cmd`，仅适用于 Windows。
+
+## 平台专用启动配方
+
+普通串口无需额外启动程序。需要 SDK monitor 等工具时，在 `startups` 中为不同平台设置独立配方，例如 Linux 项目的入口脚本：
+
+```json
+{
+  "linux_monitor": {
+    "description": "调用项目自己的 Linux monitor 入口",
+    "platforms": ["linux"],
+    "argv": ["bash", "{project_dir}/tools/monitor.sh", "{port}", "{baudrate}"],
+    "required_files": ["tools/monitor.sh"],
+    "input_target": "tool_stdin",
+    "input_notes": "必须按实际工具文档说明 stdin 接受的内容与换行符"
+  }
+}
+```
+
+把该对象放入完整板卡 JSON 的 `startups` 字段；项目需要实际提供此脚本，示例不是内置工具。入口负责选择项目 SDK 环境；MCP 只启动并转发 stdin/stdout/stderr。argv 每个元素是一个独立参数，不默认经过 Shell；需要 Shell 时显式指定。`platforms` 使用 Python 的平台标识，macOS 为 `darwin`。
+
+调用 `board_startup_prepare(profile_id=..., startup="linux_monitor", project_dir=..., port=...)` 后，核对返回的 `open_args` 再传给 `process_open`。不支持的平台返回 `unsupported_platform`，缺失文件返回 `missing_prerequisites`，不会自动安装 SDK 或编译。工具控制命令与板端数据必须根据实际工具区分；详见 [专用工具说明](processes.md)。

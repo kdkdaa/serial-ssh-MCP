@@ -22,7 +22,8 @@ def install_root() -> Path:
 def server_command() -> list[str]:
     if frozen():
         return [str(Path(sys.executable).resolve())]
-    return [str(Path(sys.executable).resolve()), str(resource_root() / "launch.py")]
+    # Preserve the venv executable path on POSIX; resolving symlinks selects base Python.
+    return [str(Path(sys.executable).absolute()), str(resource_root() / "launch.py")]
 
 
 def worker_command() -> list[str]:
