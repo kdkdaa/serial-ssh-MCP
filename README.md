@@ -84,3 +84,10 @@ MCP 返回缺失参数时，由 Agent 向用户提问；发送成功、收到输
 - [部署验证任务](docs/tasks.md) · [部署示例](examples/deploy-linux.json)
 
 终端录制保留原始收发内容，不脱敏、不加密。SSH 登录使用认证参数或密钥；通过终端发送的密码会进入录制。编译、烧录使用项目自己的工具链，需要相应操作授权；本项目不提供 MCU 仿真或通用芯片烧录器。
+
+## 实现参考
+
+- [MCP Python SDK v1 文档](https://py.sdk.modelcontextprotocol.io/v1/)：MCP 服务、工具与资源接口。
+- [pySerial API](https://pyserial.readthedocs.io/en/latest/pyserial_api.html)：串口、超时和控制线。
+- [Paramiko Client API](https://docs.paramiko.org/en/stable/api/client.html)：SSH、PTY 与 SFTP。
+- [Codex MCP 配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)：用户级和项目级 MCP 配置。
